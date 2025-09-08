@@ -3,17 +3,25 @@ import numpy as np
 import re3d
 import pygame
 import sys
+import serial
+import time
+from datetime import datetime
+import struct
+import crcmod
 
 
 CAM_RESOLUTION = (1280, 720)
 ARUCO_SIZE = 0.0585
 CAM_ID = 0
 
+
 pygame.init()
+
 
 graph_width, graph_height = 500, 400
 graph_screen = pygame.display.set_mode((graph_width, graph_height))
 pygame.display.set_caption("Углы наклона")
+
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -28,9 +36,11 @@ LIGHT_GRAY = (240, 240, 240)
 DARK_GRAY = (100, 100, 100)
 BACKGROUND = (245, 247, 250)
 
+
 GRADIENT_RED = [(255, 150, 150), (255, 100, 100), (220, 80, 80)]
 GRADIENT_GREEN = [(150, 255, 150), (100, 255, 100), (80, 220, 80)]
 GRADIENT_BLUE = [(150, 180, 255), (120, 160, 255), (100, 140, 220)]
+
 
 rect_width = 300
 rect_height = 30
@@ -38,17 +48,21 @@ rect_spacing = 50
 start_x = 80
 start_y = 80
 
+
 current_ax, current_ay, current_az = 0, 0, 0
 current_x, current_y, current_z = 0, 0, 0
 target_ax, target_ay, target_az = 0, 0, 0
 target_x, target_y, target_z = 0, 0, 0
 animation_speed = 0.2 
 
+
 pulse_value = 0
 pulse_direction = 1
 
+
 def smooth_interpolate(current, target, speed):
     return current + (target - current) * speed
+
 
 def draw_gradient_rect(surface, color_list, rect, direction=0):
     """0 = горизонтальный, 1 = вертикальный"""
@@ -75,6 +89,7 @@ def draw_gradient_rect(surface, color_list, rect, direction=0):
                            (sub_rect.x, sub_rect.y + sub_rect.height // 2, 
                             sub_rect.width, sub_rect.height // 2))
 
+
 def draw_digital_value(surface, value, x, y, color, label=""):
     font = pygame.font.SysFont('Courier New', 18, bold=True)
     if label:
@@ -84,11 +99,11 @@ def draw_digital_value(surface, value, x, y, color, label=""):
     surface.blit(text, (x, y))
     return text.get_width()
 
+
 def update_graphs():
     global current_ax, current_ay, current_az, current_x, current_y, current_z
     global pulse_value, pulse_direction
     
-    # Обновляем пульсацию
     pulse_value += 0.05 * pulse_direction
     if pulse_value >= 1.0:
         pulse_value = 1.0
@@ -161,6 +176,7 @@ def update_graphs():
     
     coord_y = start_y + 3 * rect_spacing + 20
 
+
     
     coord_values = [current_ax, current_ay, current_az]
     coord_colors = [BLUE, BLUE, BLUE]
@@ -184,6 +200,7 @@ def update_graphs():
     
     pygame.display.flip()
 
+
 try:
     with open('calibration/param.txt') as f:
         cameraMatrix = eval(f.readline())
@@ -199,9 +216,12 @@ except FileNotFoundError:
     ], dtype=np.float64)
     distCoeffs = np.array([0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
 
+
 w, h = CAM_RESOLUTION
 
+
 cap = cv2.VideoCapture(CAM_ID)
+
 
 if not cap.isOpened():
     print(f"Error: Could not open camera with ID={CAM_ID}")
@@ -213,41 +233,90 @@ if not cap.isOpened():
             print(f"Found camera with ID={i}")
             break
 
+
 if not cap.isOpened():
     print("No camera found. Exiting.")
     exit(-1)
+
 
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
 cap.set(cv2.CAP_PROP_FPS, 30)
 
+
 cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
 cap.set(cv2.CAP_PROP_FOCUS, 250)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc(*'MJPG'))
 
+
 aruco_dict_6x6 = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
 aruco_dict_5x5 = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250)
+
 
 parameters = cv2.aruco.DetectorParameters()
 detector_6x6 = cv2.aruco.ArucoDetector(aruco_dict_6x6, parameters)
 detector_5x5 = cv2.aruco.ArucoDetector(aruco_dict_5x5, parameters)
 
+
 print(f"Camera {CAM_ID} initialized successfully.")
 print("Press 'q' to quit.")
 
+
 marker_detected = False
 
-update_graphs()
+crc16_func = crcmod.mkCrcFun(0x11021, rev=False, initCrc=0xFFFF, xorOut=0x0000)
 
+
+def create_packet(ax, ay):
+    start_byte = 0xAA
+    command = 0x01
+    status = 0x00
+    payload_len = 58
+
+    payload = struct.pack('ff', ax, ay) + bytes(50)
+
+    header = struct.pack('BBBB', start_byte, command, status, payload_len)
+
+    packet_wo_crc = header + payload
+
+    crc = crc16_func(packet_wo_crc)
+
+    crc_one = (crc >> 8) & 0xFF
+    crc_two = crc & 0xFF
+
+    packet = packet_wo_crc + bytes([crc_one, crc_two])
+
+    return packet
+
+
+def send_packet(ser, ax, ay):
+    packet = create_packet(ax, ay)
+    ser.write(packet)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    print(f"{timestamp} Sent packet: {packet.hex()}")
+
+try:
+    ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.1)
+    time.sleep(2)
+    print(f"Serial port {ser.name} opened.")
+except Exception as e:
+    print(f"Error opening serial port: {e}")
+    ser = None
+
+update_graphs()
 
 while True:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
+            if ser:
+                ser.close()
             pygame.quit()
             sys.exit()
-    
+
     key = cv2.waitKey(1)
     if key == ord("q"):
+        if ser:
+            ser.close()
         break
 
     ret, frame = cap.read()
@@ -261,40 +330,39 @@ while True:
         img = frame.copy()
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
+
     corners_6x6, ids_6x6, rejected_6x6 = detector_6x6.detectMarkers(gray)
     corners_5x5, ids_5x5, rejected_5x5 = detector_5x5.detectMarkers(gray)
-    
+
     all_corners = []
     all_ids = []
-    
+
     if ids_6x6 is not None:
         all_corners.extend(corners_6x6)
         all_ids.extend(ids_6x6)
-    
+
     if ids_5x5 is not None:
         all_corners.extend(corners_5x5)
         all_ids.extend(ids_5x5)
-    
+
     marker_detected = False
-    
+
     if all_ids:
         all_ids = np.concatenate(all_ids)
         marker_detected = True
-        
+
         for i in range(len(all_ids)):
             try:
                 idx = int(all_ids[i])
                 cornersx = all_corners[i]
-                
+
                 position, mat = re3d.positionMarker(cornersx, ARUCO_SIZE, cameraMatrix)
-                
+
                 ax, ay, az = map(np.degrees, position[0])
                 rx, ry, rz = map(np.degrees, position[1])
 
-                
                 target_ax, target_ay, target_az = ax, ay, az
-                
+
                 rvec, tvec = mat
 
                 img = cv2.drawFrameAxes(img, cameraMatrix, np.array([]), rvec, tvec, 0.1, 5)
@@ -304,17 +372,20 @@ while True:
                 img = cv2.putText(
                     img,
                     f"Angle: {rz:.2f}",
-                    [40, 30], cv2.FONT_HERSHEY_SIMPLEX,
+                    (40, 30), cv2.FONT_HERSHEY_SIMPLEX,
                     1, (255, 0, 255), 2
                 )
-                
+
                 marker_type = "6x6" if idx < 250 else "5x5"
                 img = cv2.putText(
                     img,
                     f"ID:{idx} ({marker_type})",
-                    [img_pos[0], img_pos[1] + 40], cv2.FONT_HERSHEY_SIMPLEX,
+                    (img_pos[0], img_pos[1] + 40), cv2.FONT_HERSHEY_SIMPLEX,
                     0.7, (0, 255, 255), 2
                 )
+
+                if ser:
+                    send_packet(ser, ax, ay)
 
             except Exception as e:
                 print(f"Marker processing error: {e}")
@@ -327,3 +398,6 @@ while True:
 cap.release()
 cv2.destroyAllWindows()
 pygame.quit()
+
+if ser:
+    ser.close()
