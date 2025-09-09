@@ -267,15 +267,20 @@ marker_detected = False
 crc16_func = crcmod.mkCrcFun(0x11021, rev=False, initCrc=0xFFFF, xorOut=0x0000)
 
 
-def create_packet(ax, ay):
-    start_byte = 0xAA
+def create_packet(rz_pos):
+    START_BYTE_ONE = 0xBB
+    START_BYTE_TWO = 0xAB
+    START_BYTE_THREE = 0xAC
+    START_BYTE_FOUR = 0xAD
     command = 0x01
     status = 0x00
-    payload_len = 58
+    payload_len = 4
+    payload = struct.pack('B', rz_pos) + bytes(54)
 
-    payload = struct.pack('ff', ax, ay) + bytes(50)
-
-    header = struct.pack('BBBB', start_byte, command, status, payload_len)
+    header = struct.pack('BBBBBBB',
+                         START_BYTE_ONE, START_BYTE_TWO,
+                         START_BYTE_THREE, START_BYTE_FOUR,
+                         command, status, payload_len)
 
     packet_wo_crc = header + payload
 
@@ -289,10 +294,11 @@ def create_packet(ax, ay):
     return packet
 
 
-def send_packet(ser, ax, ay):
-    packet = create_packet(ax, ay)
+def send_packet(ser, rz):
+    packet = create_packet(rz)
     ser.write(packet)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    print(len(packet))
     print(f"{timestamp} Sent packet: {packet.hex()}")
 
 try:
@@ -385,7 +391,12 @@ while True:
                 )
 
                 if ser:
-                    send_packet(ser, ax, ay)
+                    rz_pos = abs(int(rz))
+                    if rz_pos > 180:
+                        rz_pos = 180
+                    print(rz_pos)
+                    send_packet(ser, rz_pos)
+
 
             except Exception as e:
                 print(f"Marker processing error: {e}")
